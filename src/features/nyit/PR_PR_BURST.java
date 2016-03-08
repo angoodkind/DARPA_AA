@@ -1,0 +1,467 @@
+package features.nyit;
+import java.io.BufferedWriter;
+import java.io.FileWriter;
+import java.io.PrintWriter;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+
+import extractors.data.Answer;
+import extractors.data.DataNode;
+import extractors.data.ExtractionModule;
+import extractors.data.Feature;
+import features.bursts.BurstType_RR;
+import features.bursts.PauseTimeDelimiter;
+import keystroke.KeyStroke;
+import output.util.SegmentAnswer;
+
+public class PR_PR_BURST implements ExtractionModule {
+	
+	private enum state {
+		INITIAL,
+		FIRST_P,
+		FIRST_R,
+		FIRST_PR,
+		SECOND_P,
+		SECOND_R,
+		SECOND_PR,
+		FINAL	
+	}
+	
+	private class StartEnd {
+		private int SIndex = 0;
+		private int EIndex = 0;
+		private int pause_before = 0;
+		private int pause_after = 0;
+		
+		public StartEnd(int sIndex, int eIndex) {
+			SIndex = sIndex;
+			EIndex = eIndex;
+		}
+		
+		public int StartIndex() {
+			return SIndex;
+		}
+		
+		public int EndIndex() {
+			return EIndex;
+		}
+		
+		public void SetPrePause(int pause) {
+			pause_before = pause;
+		}
+		
+		public void SetPostPause(int pause) {
+			pause_after = pause;
+		}
+		
+		public int GetPrePause() {
+			return pause_before;
+		}
+		
+		public int GetPostPause() {
+			return pause_after;
+		}
+	}
+	
+		
+    // 2 (Each burst contains all keys including shift, backspace, delete, alpha numeric, space, etc..)
+	// 1 (Each burst contains replayed characters, ie.., the product that comes out on a text editor after executing deletes, backspaces, etc... in line revised text)
+	// 1 (Should not be confused with the final text in the database, which we do not use at all!!!!)
+	/*@author: Zdenka Sitova
+	 * sets pause_time_in_ms variable whenever we want to TODO if I knew how to get instance of this class I wouldn't need to make this static
+	 */
+	
+	public static void setPauseTimeInMs(int pauseLength) {
+		pause_time_in_ms = pauseLength;
+		pauseDelimiter = new PauseTimeDelimiter(pause_time_in_ms);
+	}
+	private static int pause_time_in_ms = 1000;
+	private static final int pr_dist = 1;
+	private static final int min_revision_count = 3;
+	private static int mode = 1;
+	
+	
+	
+	
+	// This was meant to write the burst counts for each user to a csv file.
+	private boolean write_to_file = true;
+	private static boolean write_header = true;
+	//////////////////////////////////////////////////////////////////////////
+	
+	private ArrayList<KeyStroke> key_events;
+	private ArrayList<BurstType_RR> rrBurstArray;
+	private int startIndex;
+	private int endIndex;
+	private DataNode CurrentDataNode;
+	
+	private state delim_state;
+	
+	private static PauseTimeDelimiter pauseDelimiter = new PauseTimeDelimiter(pause_time_in_ms);
+	
+	private LinkedList<StartEnd> clippings = new LinkedList<StartEnd>();
+	
+	public DataNode getIntermediateData() {	
+		return CurrentDataNode;
+	}
+	
+	public ArrayList<BurstType_RR> getBurstArray() {	
+		return rrBurstArray;
+	}
+
+	@Override
+	public Collection<Feature> extract(DataNode data) {
+		
+
+		//CurrentDataNode = data;
+				//BurstBuilder bb = new BurstBuilder(new PPBurst());
+				//LinkedList<Long> burstTimes = new LinkedList<Long>();
+				CurrentDataNode = new DataNode();
+				CurrentDataNode.setUserID(data.getUserID());
+				System.out.println("User id: " + data.getUserID());
+				rrBurstArray = new ArrayList<BurstType_RR>();
+				
+				// Collect all bursts across all answers
+				for (Answer a: data) {
+					
+					int bursts_per_answer = 0;
+					
+					key_events = new ArrayList<KeyStroke>(a.getKeyStrokeList());
+					
+					System.out.println("Question id: " + a.getQuestionID());
+					//for (int p = 0; p < key_events.size(); p++)
+					//	System.out.println("Beginning VK code of answer: " + key_events.get(p).getKeyCode());
+					
+					//System.out.println("For question: "+ a.getQuestionID() + ", Length: " + key_events.size() + ", Beginning VK code: " + key_events.get(0).getKeyCode() + ", Last VK code: " + key_events.get(key_events.size()-1).getKeyCode() + ", Beginning Cur Pos: " + key_events.get(0).getCursorPosition() + ", End Cur Pos: " + key_events.get(key_events.size()-1).getCursorPosition());
+
+					startIndex = 0;
+					
+					clippings.clear();
+					boolean no_burst = true;
+					
+					boolean add_clip = false;
+					
+					int prev_before_pause = 0;
+					int before_pause = 0;
+					int after_pause = 0;
+					
+					int prev_start_pause_index = 0;
+					int start_pause_index = 0;
+					int end_pause_index = 0;
+					
+					int revision_count = 0; // Counts the number of backspaces within a revision
+					int PR_char_count = 0;  //  Counts the number of characters between a pause and a revision
+					
+					boolean reset_revision_count = false;
+					boolean reset_PR_char_count = false;
+					
+					int pause_index = 0;
+					int revision_start_index = 0;
+					int revision_end_index = 0;
+					
+					int r1_start_index = 0;
+					int r1_end_index = 0;
+					
+					int r2_start_index = 0;
+					int r2_end_index = 0;
+					
+					int current_pause = 0;
+					
+					delim_state = state.INITIAL;
+					
+					while (startIndex < key_events.size() && key_events.get(startIndex).isKeyRelease()) { startIndex++; }
+					
+					//Get the index of the last key press
+					int end_key_press_marker = key_events.size()-1;
+					while ( end_key_press_marker >= 0 && key_events.get(end_key_press_marker).isKeyRelease()) { end_key_press_marker--;}
+					
+					for (endIndex = startIndex + 1; endIndex < key_events.size()-1; endIndex++) {
+						
+						int rev_depth = 0;
+						
+						KeyStroke previous_key_event =  key_events.get(endIndex - 1); // Initialize to start Index position, same as previous_key_event = startIndex
+						KeyStroke current_key_event =  key_events.get(endIndex);      // Initialize to end Index position, same as previous_key_event = endIndex
+						
+						if (current_key_event.isKeyPress()) {//Check for a key press to identify a possible 'pause' occurence
+							
+							if (previous_key_event.isKeyRelease()) {//Check for a preceding key release to identify a possible 'pause' occurence
+								
+								if (pauseDelimiter.isDelimiter(previous_key_event, current_key_event)) {//If a pause is detected
+									
+									reset_revision_count = true;
+									reset_PR_char_count = true;
+									pause_index = endIndex; // This is current key, index where key press has occurred. This is the start of a potential burst
+									
+									current_pause = (int)(current_key_event.getWhen() - previous_key_event.getWhen()); //Measure the duration of the pause
+									
+									switch (delim_state) {
+										case INITIAL: {
+											delim_state = state.FIRST_P;
+											start_pause_index = endIndex;
+											before_pause = current_pause;
+											break;
+										}
+										case FIRST_P: {
+											if (revision_count >= min_revision_count && PR_char_count <= pr_dist) {
+												delim_state = state.SECOND_P;
+												end_pause_index = endIndex;    
+												after_pause = current_pause;
+											}
+											else {
+												start_pause_index = endIndex;
+												before_pause = current_pause;
+												delim_state = state.FIRST_P; // Maintain the state
+											}
+											break;
+										}
+										case FIRST_PR: {
+											r1_start_index = revision_start_index;
+											r1_end_index = revision_end_index;
+											end_pause_index = endIndex;    
+											after_pause = current_pause;
+											delim_state = state.SECOND_P; // Change the state to P2
+											break;
+										}
+										case SECOND_P: { // If you find a third pause.....
+											System.out.println("PAUSE AT: " + endIndex + " REVISION DEPTH: " + revision_count);
+											if (revision_count >= min_revision_count && PR_char_count <= pr_dist) { /// Confirm if the last PR is legit.
+												r2_start_index = revision_start_index;
+												r2_end_index = revision_end_index;
+												add_clip = true;
+												delim_state = state.FIRST_P; // Revert the state back to P1
+											}
+											else { // Start over when last PR is not valid.
+												start_pause_index = endIndex; 
+												before_pause = current_pause;
+												delim_state = state.FIRST_P; // Revert the state back to P1
+											}
+											break;
+										}
+									}
+
+								}
+							}
+							
+							switch (current_key_event.getKeyCode()) {//Does the key press event belong to a Revision Count
+								case 8: {
+									revision_count++;
+									System.out.println("AT: " + endIndex + " REVISION COUNTER: " + revision_count);
+									if (revision_count == 1) {
+										revision_start_index = endIndex; //endIndex is a key press event, which marks the end of the pause and here, press of a backspace key
+									}
+									revision_end_index = endIndex;
+									break;
+								}
+								default: {							
+									if (revision_count >= min_revision_count) { //PR_char_count <= pr_dist
+										revision_end_index = endIndex;
+										//How does this warrant a change of state, because this does not ensure PR_char_count < =  pr_dist
+										if (delim_state == state.FIRST_P)
+											delim_state = state.FIRST_R;
+										if (delim_state == state.SECOND_P)
+											delim_state = state.SECOND_R;
+									}
+									else
+										PR_char_count++;
+									
+									reset_revision_count = true;
+								}
+							
+							}//End of state change to revision, either R1 or R2......
+							
+							rev_depth = revision_count;					
+							
+							System.out.println("AT " + endIndex + " -> STATE IS: " + delim_state);
+							
+												
+							switch (delim_state) {
+								case FIRST_R: {
+									if (PR_char_count <= pr_dist) {//Confirm that this is a "Pause followed By a Revision" and not a lone "Pause"
+										if (revision_end_index > pause_index) {
+											delim_state = state.FIRST_PR;
+											r1_start_index = revision_start_index;
+											r1_end_index = revision_end_index;
+										}
+									}
+									else
+										delim_state = state.INITIAL; // Switch back to Initial. Because we are looking for a pure PR;
+									break;
+								}
+								case SECOND_R: {
+									if (PR_char_count <= pr_dist) {
+										if (revision_end_index > pause_index) {
+											r2_start_index = revision_start_index;
+											r2_end_index = revision_end_index;
+											add_clip = true;
+											delim_state = state.FIRST_PR;
+										}
+									}
+									else
+										delim_state = state.INITIAL; // Switch back to Initial. Because we are looking for a pure PR;
+									break;
+								}
+							}//End of state change to initial (if PR occurs), first P (if first R does not occur), or perform a PP clip (if second R does not occur)					
+						}
+						
+						// This block adds new burst clip
+						if (add_clip) {
+							StartEnd clip = new StartEnd(start_pause_index, end_pause_index); // This does not include borderline revision into the burst
+							//StartEnd clip = new StartEnd(start_pause_index, r2_end_index); // This includes R2 revision end index. You can also use R1 (start or end index) instead of start_pause_index 
+							
+							System.out.println("AT: " + endIndex + " REVISION_DEPTH: " + rev_depth + " MIN_REV_COUNT: " + min_revision_count);
+							System.out.println("FROM: " + start_pause_index + " TO: " + end_pause_index);
+							clip.SetPrePause(before_pause);
+							clip.SetPostPause(after_pause);
+							clippings.add(clip);
+							
+							// If this block is triggered by a thrid pause, then make the third pause as first.
+							if ((delim_state == state.FIRST_P && pause_index > end_pause_index) || delim_state == state.FIRST_PR) {
+								start_pause_index = pause_index;
+								before_pause = current_pause;
+								//delim_state = state.SECOND_P;
+							}
+							add_clip = false;
+						}
+						
+						/// Implement counter resets here
+						if (reset_revision_count) {
+							if (current_key_event.getKeyCode() == 8) {
+								revision_count = 1;
+							}
+							else
+								revision_count = 0;
+							
+							reset_revision_count = false;
+						}
+						
+						if (reset_PR_char_count) {
+							if (current_key_event.getKeyCode() == 8)
+									PR_char_count = 0;						
+							else
+								PR_char_count = 1;
+							
+							reset_PR_char_count = false;
+						}
+					}
+					
+					for (int se_index = 0; se_index < clippings.size(); se_index++) {
+						
+						StartEnd clip = clippings.get(se_index);
+						
+						if (clip.StartIndex() >= clip.EndIndex())
+							continue;
+						
+						System.out.println("clip start_index: " + clip.StartIndex());
+						System.out.println("before pause: " + clip.GetPrePause());
+						System.out.println("clip end_index: " + clip.EndIndex());
+						System.out.println("after pause: " + clip.GetPostPause());
+						
+						List<KeyStroke> burst_keys = key_events.subList(clip.StartIndex(), clip.EndIndex());
+						BurstType_RR burst = new BurstType_RR(new ArrayList<KeyStroke>(burst_keys));
+						
+						burst.SetPauseAfter(clip.GetPostPause());
+						burst.SetPauseBefore(clip.GetPrePause());
+							
+						// Add only the bursts that are valid for lexical analysis.
+						if (burst.isValid()) {
+							rrBurstArray.add(burst);
+							CurrentDataNode.add(SegmentAnswer.BetweenKeyStrokes(a, clip.StartIndex(), clip.EndIndex()-1, mode));
+							no_burst = false;
+							bursts_per_answer++;
+						}
+					}
+					
+					if (write_to_file) {
+						try {
+							String output_file = CreateFileOnce.GetAbsoluteFilePath();
+						    PrintWriter out = new PrintWriter(new BufferedWriter(new FileWriter(output_file, true)));
+						    if (write_header) {
+						    	out.println("UserId,QuestionId,BurstCount");
+						    	write_header = false;
+						    }
+						    out.println(data.getUserID() + "," + a.getQuestionID() + "," + bursts_per_answer);
+						    out.close();
+						} catch (Exception e) {
+						    System.out.println("Error writing burst count file");
+						}
+					}
+					
+				}
+				
+				//new java.io.File("PR-PR").mkdirs();
+				
+				LinkedList<Feature> output = new LinkedList<Feature>();
+				
+				LinkedList<Integer> ksCount1 = new LinkedList<Integer>();
+				LinkedList<Double> ratio1 = new LinkedList<Double>();
+				LinkedList<Double> ratio2 = new LinkedList<Double>();
+				LinkedList<Long> burstTimes1 = new LinkedList<Long>();
+				LinkedList<Double> burstKeyDensity1 = new LinkedList<Double>();
+				
+				LinkedList<Double> preBurstKeyDensity = new LinkedList<Double>();
+				LinkedList<Double> preBurstKeyDensity2 = new LinkedList<Double>();
+				LinkedList<Double> postBurstKeyDensity = new LinkedList<Double>();
+				LinkedList<Double> postBurstKeyDensity2 = new LinkedList<Double>();
+				
+				for (BurstType_RR b : rrBurstArray) {
+						long burst_time = b.burstTime();
+						//This gets the burst times
+						burstTimes1.add(burst_time/1000);
+						ksCount1.add(b.burstChars());
+						burstKeyDensity1.add((double)b.burstChars()/b.burstTime());
+						
+						preBurstKeyDensity.add((double)(b.burstChars() * 1000)/b.GetPauseBefore());
+						preBurstKeyDensity2.add((double)(b.burstAlphaChars() * 1000)/b.GetPauseBefore());
+						postBurstKeyDensity.add((double)(b.burstChars() * 1000)/b.GetPauseAfter());
+						postBurstKeyDensity2.add((double)(b.burstAlphaChars() * 1000)/b.GetPauseAfter());
+						
+						//This computes the typing speed
+						if (burst_time >= 0) {
+							double r = (double)(b.burstChars() * 1000)/(double)burst_time;
+							ratio1.add(r);
+							double r2 = (double)(b.burstChars() * 1000)/(double)burst_time;
+							ratio2.add(r2);
+						}
+				}
+				
+				output.add(new Feature("RR_Burst_Type_Speed", ratio1));
+				output.add(new Feature("RR_Burst_Type_Speed_Alpha", ratio2));
+				output.add(new Feature("PP_PreBurst", preBurstKeyDensity));
+				output.add(new Feature("RR_PreBurst_Alpha", preBurstKeyDensity2));
+				output.add(new Feature("RR_PostBurst", postBurstKeyDensity));
+				output.add(new Feature("RR_PostBurst_Alpha", postBurstKeyDensity2));
+				//output.add(new Feature("RP1_Char_Count",ksCount1));
+				
+				return output;
+	}
+	
+	private static class CreateFileOnce {
+		private static boolean write_switch = true;
+		private static String output_file_path = "";
+		
+		public static String GetAbsoluteFilePath() {
+			if (write_switch) {
+				write_switch = false;
+				String workingDir = System.getProperty("user.dir");
+				java.io.File output_dir = new java.io.File(workingDir,"BurstStats/R-R");
+				output_dir.mkdirs();
+				Date dateBegin = new Date();
+				SimpleDateFormat dateformat = new SimpleDateFormat("yyyy-MM-dd[H-m-s]Z");
+				StringBuilder now = new StringBuilder(dateformat.format(dateBegin));
+				output_file_path = new java.io.File(output_dir.getAbsolutePath(), "RR_BurstsPerAnswer" + now + ".csv").toString();
+				
+			}
+			
+			return output_file_path;
+		}
+	}
+	
+	@Override
+	public String getName() {
+		return "RR Burst Metrics";
+	}
+
+}
